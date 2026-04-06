@@ -8,6 +8,11 @@ This repository is a simple KiCad plugin GUI wrapper.
 2. Clone this repository:
 
 ```bash
+git clone https://github.com/zahran-rzq/JLC2KiCad_lib_gui.git
+```
+
+original repo
+```bash
 git clone https://github.com/dzid26/JLC2KiCad_lib_gui.git
 ```
 
