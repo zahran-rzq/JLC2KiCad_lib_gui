@@ -18,11 +18,12 @@ from .core_library_installer import (
 )
 
 
-OUTPUT_FOLDER = "JLC2KiCad_lib"
+OUTPUT_FOLDER = "kicad_libs"
 FOOTPRINT_LIB  = "footprint"
-FOOTPRINT_LIB_NICK  = "jlc"  #set the same as FOOTPRINT_LIB, or to nickname choosen in Footprint libraries manager
-SYMBOL_LIB = "default_lib"
-SYMBOL_LIB_DIR = "symbol"
+FOOTPRINT_LIB_NICK  = "footprint"  #set the same as FOOTPRINT_LIB, or to nickname choosen in Footprint libraries manager
+# Leave empty so JLC2KiCadLib creates one symbol library file per product name.
+SYMBOL_LIB = ""
+SYMBOL_LIB_DIR = "symbols"
 
 
 helper = None
@@ -102,6 +103,11 @@ class MyCustomDialog(wx.Dialog):
     def __init__(self, parent, title, message, caption):
         super(MyCustomDialog, self).__init__(parent, title=title, style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
 
+        board: pcbnew.BOARD = pcbnew.GetBoard()
+        board_file = board.GetFileName() if board else ""
+        self.board_dir = os.path.dirname(board_file) if board_file else os.getcwd()
+        self.default_output_dir = os.path.join(self.board_dir, OUTPUT_FOLDER)
+
         # Create a sizer to manage the layout
         sizer = wx.BoxSizer(wx.VERTICAL)
 
@@ -118,6 +124,15 @@ class MyCustomDialog(wx.Dialog):
         # Add a text entry field
         self.text_entry = wx.TextCtrl(self, style=wx.TE_PROCESS_ENTER)
         sizer.Add(self.text_entry, 0, wx.ALL | wx.EXPAND, 10)
+
+        output_row = wx.BoxSizer(wx.HORIZONTAL)
+        output_label = wx.StaticText(self, label="Output folder")
+        self.output_entry = wx.TextCtrl(self, value=self.default_output_dir)
+        browse_button = wx.Button(self, wx.ID_ANY, "Browse...")
+        output_row.Add(output_label, 0, wx.RIGHT | wx.ALIGN_CENTER_VERTICAL, 8)
+        output_row.Add(self.output_entry, 1, wx.RIGHT | wx.ALIGN_CENTER_VERTICAL, 8)
+        output_row.Add(browse_button, 0, wx.ALIGN_CENTER_VERTICAL, 0)
+        sizer.Add(output_row, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.EXPAND, 10)
 
         # Add custom buttons, right-aligned.
         button_row = wx.BoxSizer(wx.HORIZONTAL)
@@ -140,6 +155,7 @@ class MyCustomDialog(wx.Dialog):
 
         self.Bind(wx.EVT_BUTTON, self.OnDownload, id=wx.ID_APPLY)
         self.Bind(wx.EVT_BUTTON, self.OnUpdateCoreLibrary, id=self.update_button.GetId())
+        self.Bind(wx.EVT_BUTTON, self.OnBrowseOutput, id=browse_button.GetId())
         self.Bind(wx.EVT_BUTTON, self.OnPlaceFootprint, id=wx.ID_OK)
         self.Bind(wx.EVT_BUTTON, self.OnCancel, id=wx.ID_CANCEL)
         self.Bind(wx.EVT_BUTTON, self.OnHelp, id=wx.ID_HELP)
@@ -175,15 +191,48 @@ class MyCustomDialog(wx.Dialog):
             self.text_entry.SelectAll()
         self.text_entry.SetFocus()
 
+    def _get_output_dir(self):
+        configured = self.output_entry.GetValue().strip()
+        if not configured:
+            return ""
+        expanded = os.path.expanduser(os.path.expandvars(configured))
+        if os.path.isabs(expanded):
+            return expanded
+        return os.path.abspath(os.path.join(self.board_dir, expanded))
+
+    def OnBrowseOutput(self, event):
+        current = self._get_output_dir() or self.default_output_dir
+        if not os.path.isdir(current):
+            current = self.board_dir
+        with wx.DirDialog(
+            self,
+            "Choose output folder",
+            defaultPath=current,
+            style=wx.DD_DEFAULT_STYLE | wx.DD_DIR_MUST_EXIST,
+        ) as dlg:
+            if dlg.ShowModal() == wx.ID_OK:
+                self.output_entry.SetValue(dlg.GetPath())
+
 
     def OnDownload(self, event):
         component_id = self.text_entry.GetValue()
         if not component_id:
             wx.MessageBox("Type part number, e.g. C326215")
             return
-        board: pcbnew.BOARD = pcbnew.GetBoard()
-        board_dir = os.path.dirname(board.GetFileName())
-        self.libpath, self.component_name = download_part(component_id, os.path.join(board_dir, OUTPUT_FOLDER), True, True)
+        out_dir = self._get_output_dir()
+        if not out_dir:
+            wx.MessageBox("Choose output folder first")
+            return
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except OSError as exc:
+            wx.MessageBox(f"Cannot create output folder:\n{out_dir}\n\n{type(exc).__name__}: {exc}")
+            return
+
+        self.libpath, self.component_name = download_part(component_id, out_dir, True, True)
+        if not self.component_name:
+            return
+
         wx.MessageBox(f"Footprint " + self.component_name + " downloaded to project library " + self.libpath)
 
     def OnPlaceFootprint(self, event):
@@ -222,7 +271,7 @@ class MyCustomDialog(wx.Dialog):
                 self.EndModal(wx.ID_CANCEL)
 
     def OnHelp(self, event):
-        wx.MessageBox("Test button download footprint to temporary folder and copies to clipboard, press Ctrl+V to paste.\nDownloading to project uses JLC2KiCad_lib library folder in the project path", "Help", wx.OK | wx.ICON_INFORMATION)
+        wx.MessageBox("Test button download footprint to temporary folder and copies to clipboard, press Ctrl+V to paste.\nDownload to project saves to the selected output folder.", "Help", wx.OK | wx.ICON_INFORMATION)
 
 
 def download_part(component_id, out_dir, get_symbol=False, skip_existing=False):

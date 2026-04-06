@@ -31,3 +31,55 @@ If needed, you can install/update manually, e.g.:
 git pull
 "c:/Program Files/KiCad/9.0/bin/python.exe" -m pip install --upgrade JLC2KiCadLib
 ```
+
+## Output folder (GUI)
+
+- Di dialog plugin sekarang ada field `Output folder` + tombol `Browse...`.
+- Jika isi path relatif, path akan dianggap relatif terhadap folder project KiCad aktif.
+- Jika folder belum ada, plugin akan membuatnya otomatis.
+
+## Menjalankan JLC2KiCad secara manual
+
+### 1) Cek CLI resmi dari library JLC2KiCadLib
+
+Gunakan ini untuk melihat syntax dan argumen terbaru sesuai versi yang terpasang:
+
+```bash
+"c:/Program Files/KiCad/9.0/bin/python.exe" -m JLC2KiCadLib --help
+```
+
+Jika command di atas tidak tersedia pada versi tertentu, cek package detail:
+
+```bash
+"c:/Program Files/KiCad/9.0/bin/python.exe" -m pip show JLC2KiCadLib
+```
+
+### 2) Manual lewat API plugin (stabil untuk flow plugin ini)
+
+Di wrapper ini, fungsi yang dipakai adalah:
+
+```python
+download_part(component_id, out_dir, get_symbol=False, skip_existing=False)
+```
+
+Argumen:
+
+- `component_id`: nomor part JLC/LCSC, contoh `C326215`
+- `out_dir`: folder output tujuan
+- `get_symbol`: `True` untuk ikut generate symbol
+- `skip_existing`: `True` untuk melewati file yang sudah ada
+
+Contoh pemakaian minimal dari Python KiCad:
+
+```python
+from JLC2KiCad_gui import download_part
+
+libpath, component_name = download_part(
+	component_id="C326215",
+	out_dir=r"D:/kicad/libs/JLC2KiCad_lib",
+	get_symbol=True,
+	skip_existing=True,
+)
+
+print(libpath, component_name)
+```
