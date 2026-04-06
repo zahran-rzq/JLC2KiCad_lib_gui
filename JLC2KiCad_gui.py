@@ -106,6 +106,7 @@ class MyCustomDialog(wx.Dialog):
         board: pcbnew.BOARD = pcbnew.GetBoard()
         board_file = board.GetFileName() if board else ""
         self.board_dir = os.path.dirname(board_file) if board_file else os.getcwd()
+        self.project_dir = self._find_project_dir(self.board_dir)
         self.default_output_dir = os.path.join(self.board_dir, OUTPUT_FOLDER)
 
         # Create a sizer to manage the layout
@@ -140,11 +141,15 @@ class MyCustomDialog(wx.Dialog):
 
         ok_button = wx.Button(self, wx.ID_OK, "Copy to clipboard")
         download_button = wx.Button(self, wx.ID_APPLY, "Download to project library")
+        auto_import_button = wx.Button(self, wx.ID_ANY, "beta Download + Auto Import (need restart kicad)")
+        import_symbols_button = wx.Button(self, wx.ID_ANY, "beta Import Symbols (Semi Auto) (need restart kicad)")
         cancel_button = wx.Button(self, wx.ID_CANCEL, "Cancel")
         help_button = wx.Button(self, wx.ID_HELP, "Help")
 
         button_row.Add(ok_button, 0, wx.LEFT, 6)
         button_row.Add(download_button, 0, wx.LEFT, 6)
+        button_row.Add(auto_import_button, 0, wx.LEFT, 6)
+        button_row.Add(import_symbols_button, 0, wx.LEFT, 6)
         button_row.Add(cancel_button, 0, wx.LEFT, 6)
         button_row.Add(help_button, 0, wx.LEFT, 6)
 
@@ -154,6 +159,8 @@ class MyCustomDialog(wx.Dialog):
         self.Fit()
 
         self.Bind(wx.EVT_BUTTON, self.OnDownload, id=wx.ID_APPLY)
+        self.Bind(wx.EVT_BUTTON, self.OnDownloadAutoImport, id=auto_import_button.GetId())
+        self.Bind(wx.EVT_BUTTON, self.OnImportSymbolsOnly, id=import_symbols_button.GetId())
         self.Bind(wx.EVT_BUTTON, self.OnUpdateCoreLibrary, id=self.update_button.GetId())
         self.Bind(wx.EVT_BUTTON, self.OnBrowseOutput, id=browse_button.GetId())
         self.Bind(wx.EVT_BUTTON, self.OnPlaceFootprint, id=wx.ID_OK)
@@ -213,20 +220,128 @@ class MyCustomDialog(wx.Dialog):
             if dlg.ShowModal() == wx.ID_OK:
                 self.output_entry.SetValue(dlg.GetPath())
 
-
-    def OnDownload(self, event):
-        component_id = self.text_entry.GetValue()
+    def _prepare_download(self):
+        component_id = self.text_entry.GetValue().strip()
         if not component_id:
             wx.MessageBox("Type part number, e.g. C326215")
-            return
+            return "", ""
+
         out_dir = self._get_output_dir()
         if not out_dir:
             wx.MessageBox("Choose output folder first")
-            return
+            return "", ""
+
         try:
             os.makedirs(out_dir, exist_ok=True)
         except OSError as exc:
             wx.MessageBox(f"Cannot create output folder:\n{out_dir}\n\n{type(exc).__name__}: {exc}")
+            return "", ""
+
+        return component_id, out_dir
+
+    @staticmethod
+    def _collect_symbol_library_files(out_dir):
+        symbol_dir = os.path.join(out_dir, SYMBOL_LIB_DIR)
+        if not os.path.isdir(symbol_dir):
+            return []
+        symbol_files = []
+        for name in os.listdir(symbol_dir):
+            if name.lower().endswith(".kicad_sym"):
+                symbol_files.append(os.path.join(symbol_dir, name))
+        symbol_files.sort()
+        return symbol_files
+
+    @staticmethod
+    def _find_project_dir(start_dir):
+        current = os.path.abspath(start_dir)
+        while True:
+            try:
+                files = os.listdir(current)
+            except OSError:
+                files = []
+
+            has_kicad_project = any(
+                name.lower().endswith(".kicad_pro") or name.lower().endswith(".pro")
+                for name in files
+            )
+            if has_kicad_project:
+                return current
+
+            parent = os.path.dirname(current)
+            if not parent or parent == current:
+                return os.path.abspath(start_dir)
+            current = parent
+
+    def _symbol_table_uri(self, symbol_file):
+        symbol_file = os.path.abspath(symbol_file)
+        project_dir = os.path.abspath(self.project_dir)
+        try:
+            rel_path = os.path.relpath(symbol_file, project_dir)
+            if not rel_path.startswith("..") and not os.path.isabs(rel_path):
+                return "${KIPRJMOD}/" + rel_path.replace("\\", "/")
+        except ValueError:
+            pass
+        return symbol_file.replace("\\", "/")
+
+    @staticmethod
+    def _unique_library_name(base_name, table_text):
+        candidate = base_name
+        suffix = 2
+        while f'(name "{candidate}")' in table_text:
+            candidate = f"{base_name}_{suffix}"
+            suffix += 1
+        return candidate
+
+    def _import_symbol_libraries_to_project(self, out_dir):
+        symbol_files = self._collect_symbol_library_files(out_dir)
+        if not symbol_files:
+            return 0, 0, os.path.join(self.project_dir, "sym-lib-table")
+
+        table_path = os.path.join(self.project_dir, "sym-lib-table")
+        if os.path.isfile(table_path):
+            with open(table_path, "r", encoding="utf-8") as table_file:
+                table_text = table_file.read()
+        else:
+            table_text = "(sym_lib_table\n)\n"
+
+        if "(sym_lib_table" not in table_text:
+            raise RuntimeError("sym-lib-table format is not recognized")
+
+        imported = 0
+        skipped = 0
+        entries_to_add = []
+        table_index_text = table_text
+
+        for symbol_file in symbol_files:
+            uri = self._symbol_table_uri(symbol_file)
+            if f'(uri "{uri}")' in table_text:
+                skipped += 1
+                continue
+
+            base_name = os.path.splitext(os.path.basename(symbol_file))[0]
+            lib_name = self._unique_library_name(base_name, table_index_text)
+            entry = (
+                f'  (lib (name "{lib_name}") (type "KiCad") '
+                f'(uri "{uri}") (options "") (descr "Imported by JLC2KiCad GUI"))\n'
+            )
+            entries_to_add.append(entry)
+            table_index_text += entry
+            imported += 1
+
+        if entries_to_add:
+            insert_at = table_text.rfind(")")
+            if insert_at < 0:
+                raise RuntimeError("sym-lib-table footer not found")
+            new_text = table_text[:insert_at] + "".join(entries_to_add) + table_text[insert_at:]
+            with open(table_path, "w", encoding="utf-8") as table_file:
+                table_file.write(new_text)
+
+        return imported, skipped, table_path
+
+
+    def OnDownload(self, event):
+        component_id, out_dir = self._prepare_download()
+        if not component_id:
             return
 
         self.libpath, self.component_name = download_part(component_id, out_dir, True, True)
@@ -234,6 +349,55 @@ class MyCustomDialog(wx.Dialog):
             return
 
         wx.MessageBox(f"Footprint " + self.component_name + " downloaded to project library " + self.libpath)
+
+    def OnDownloadAutoImport(self, event):
+        component_id, out_dir = self._prepare_download()
+        if not component_id:
+            return
+
+        self.libpath, self.component_name = download_part(component_id, out_dir, True, True)
+        if not self.component_name:
+            return
+
+        try:
+            imported, skipped, table_path = self._import_symbol_libraries_to_project(out_dir)
+        except Exception as exc:
+            wx.MessageBox(
+                "Download succeeded but symbol auto-import failed.\n"
+                f"{type(exc).__name__}: {exc}"
+            )
+            return
+
+        wx.MessageBox(
+            f"Footprint {self.component_name} downloaded to {self.libpath}\n"
+            f"Symbol libraries imported: {imported}, skipped: {skipped}\n"
+            f"Project dir: {self.project_dir}\n"
+            f"Project table: {table_path}"
+        )
+
+    def OnImportSymbolsOnly(self, event):
+        out_dir = self._get_output_dir()
+        if not out_dir:
+            wx.MessageBox("Choose output folder first")
+            return
+        if not os.path.isdir(out_dir):
+            wx.MessageBox("Output folder does not exist yet")
+            return
+
+        try:
+            imported, skipped, table_path = self._import_symbol_libraries_to_project(out_dir)
+        except Exception as exc:
+            wx.MessageBox(
+                "Symbol import failed.\n"
+                f"{type(exc).__name__}: {exc}"
+            )
+            return
+
+        wx.MessageBox(
+            f"Symbol libraries imported: {imported}, skipped: {skipped}\n"
+            f"Project dir: {self.project_dir}\n"
+            f"Project table: {table_path}"
+        )
 
     def OnPlaceFootprint(self, event):
         component_id = self.text_entry.GetValue()
@@ -271,7 +435,14 @@ class MyCustomDialog(wx.Dialog):
                 self.EndModal(wx.ID_CANCEL)
 
     def OnHelp(self, event):
-        wx.MessageBox("Test button download footprint to temporary folder and copies to clipboard, press Ctrl+V to paste.\nDownload to project saves to the selected output folder.", "Help", wx.OK | wx.ICON_INFORMATION)
+        wx.MessageBox(
+            "Copy to clipboard downloads footprint to a temporary folder and copies it to clipboard (Ctrl+V to paste).\n"
+            "Download to project library saves files to the selected output folder.\n"
+            "Download + Auto Import also adds all .kicad_sym files to project sym-lib-table automatically.\n"
+            "Import Symbols (Semi Auto) only updates project sym-lib-table from existing downloaded symbols.",
+            "Help",
+            wx.OK | wx.ICON_INFORMATION,
+        )
 
 
 def download_part(component_id, out_dir, get_symbol=False, skip_existing=False):
